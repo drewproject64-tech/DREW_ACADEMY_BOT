@@ -12,7 +12,7 @@ Tap /start for the three-button keyboard. `/stats text`, `/clean text` and `/cas
 
 Python 3.12+, `pip install -r requirements.txt`, set `BOT_TOKEN` in the environment, run `python bot.py`. Docker is supported. Use one always-on worker per token. Never commit the token. `.env.example` is documentation; environment variables must actually be set by the host.
 
-Name, About and complete Description are in `bot.py` and apply at startup. The token must belong to @DREW_ACADEMY_BOT. Add a profile image with BotFather. No user text is saved in a database or sent to AI services; Telegram and the host still process traffic. Only tool choices are kept in server memory.
+Name, About and complete Description are in `bot.py`. Startup compares the current Telegram profile with these values and writes only changed fields. If Telegram rate-limits or rejects profile maintenance, the bot logs it and continues to polling without waiting or immediately retrying. A deferred profile change can be applied on a later restart after the reported cooldown. The token must belong to @DREW_ACADEMY_BOT. Add a profile image with BotFather. No user text is saved in a database or sent to AI services; Telegram and the host still process traffic. Only tool choices are kept in server memory.
 
 ## Verification
 

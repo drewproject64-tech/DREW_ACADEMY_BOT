@@ -4,7 +4,7 @@ import os
 import re
 import httpx
 from telegram import BotCommand, ReplyKeyboardMarkup, Update
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.request import HTTPXRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -153,18 +153,45 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             LOG.error('Recovery message could not be sent')
 
 
+def command_list():
+    return [BotCommand(c, d) for c, d in [
+        ('start', 'Open the three-tool menu'), ('stats', 'Count words and characters'),
+        ('clean', 'Clean extra spacing'), ('case', 'Convert text case'),
+        ('help', 'Read instructions'), ('cancel', 'Clear your current session'), ('privacy', 'Read data information')]]
+
+
+async def sync_profile(api):
+    # Profile maintenance is optional. Never wait out a flood cooldown here:
+    # polling must start even when Telegram rejects a metadata update.
+    fields = [
+        ('name', api.get_my_name, api.set_my_name, 'name', NAME),
+        ('about', api.get_my_short_description, api.set_my_short_description, 'short_description', ABOUT),
+        ('description', api.get_my_description, api.set_my_description, 'description', DESCRIPTION),
+        ('commands', api.get_my_commands, api.set_my_commands, None, command_list()),
+    ]
+    timeouts = dict(connect_timeout=5, read_timeout=5, write_timeout=5, pool_timeout=5)
+    for label, getter, setter, attribute, desired in fields:
+        try:
+            current = await getter(**timeouts)
+            value = getattr(current, attribute) if attribute else list(current)
+            if value != desired:
+                await setter(desired, **timeouts)
+        except RetryAfter as error:
+            cooldown = error.retry_after
+            seconds = cooldown.total_seconds() if hasattr(cooldown, 'total_seconds') else cooldown
+            LOG.warning('Profile sync deferred at %s: Telegram cooldown %s seconds; polling will continue', label, seconds)
+            return
+        except TelegramError as error:
+            LOG.warning('Profile sync deferred at %s (%s); polling will continue', label, type(error).__name__)
+            return
+
+
 async def setup(application: Application):
     me = await application.bot.get_me()
     if (me.username or '').lower() != USERNAME.lower():
         raise RuntimeError('BOT_TOKEN must belong to @DREW_ACADEMY_BOT.')
-    await application.bot.set_my_name(NAME)
-    await application.bot.set_my_short_description(ABOUT)
-    await application.bot.set_my_description(DESCRIPTION)
-    await application.bot.set_my_commands([BotCommand(c, d) for c, d in [
-        ('start', 'Open the three-tool menu'), ('stats', 'Count words and characters'),
-        ('clean', 'Clean extra spacing'), ('case', 'Convert text case'),
-        ('help', 'Read instructions'), ('cancel', 'Clear your current session'), ('privacy', 'Read data information')]])
-    LOG.warning('Profile configured for @%s; starting polling', me.username)
+    await sync_profile(application.bot)
+    LOG.warning('Startup complete for @%s; starting polling', me.username)
 
 
 def api_request():

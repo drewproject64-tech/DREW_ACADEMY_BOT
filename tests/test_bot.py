@@ -53,11 +53,53 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         await self.send('   ')
         self.assertIn('non-space', self.message.reply_text.call_args.args[0])
 
-    async def test_profile(self):
+    def profile_api(self, matching=True):
+        return SimpleNamespace(
+            get_me=AsyncMock(return_value=SimpleNamespace(username=bot.USERNAME)),
+            get_my_name=AsyncMock(return_value=SimpleNamespace(name=bot.NAME if matching else 'Old name')),
+            get_my_short_description=AsyncMock(return_value=SimpleNamespace(short_description=bot.ABOUT if matching else 'Old about')),
+            get_my_description=AsyncMock(return_value=SimpleNamespace(description=bot.DESCRIPTION if matching else 'Old description')),
+            get_my_commands=AsyncMock(return_value=bot.command_list() if matching else []),
+            set_my_name=AsyncMock(), set_my_short_description=AsyncMock(),
+            set_my_description=AsyncMock(), set_my_commands=AsyncMock())
+
+    async def test_unchanged_profile_never_writes(self):
         self.assertLessEqual(len(bot.ABOUT), 120)
         self.assertLessEqual(len(bot.DESCRIPTION), 512)
-        api = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(username=bot.USERNAME)),
-            set_my_name=AsyncMock(), set_my_short_description=AsyncMock(), set_my_description=AsyncMock(), set_my_commands=AsyncMock())
+        api = self.profile_api()
         await bot.setup(SimpleNamespace(bot=api))
-        api.set_my_short_description.assert_awaited_once_with(bot.ABOUT)
-        api.set_my_description.assert_awaited_once_with(bot.DESCRIPTION)
+        for name in ('set_my_name', 'set_my_short_description', 'set_my_description', 'set_my_commands'):
+            getattr(api, name).assert_not_awaited()
+
+    async def test_changed_profile_applies_about_and_description(self):
+        api = self.profile_api(False)
+        await bot.setup(SimpleNamespace(bot=api))
+        self.assertEqual(api.set_my_short_description.call_args.args[0], bot.ABOUT)
+        self.assertEqual(api.set_my_description.call_args.args[0], bot.DESCRIPTION)
+        self.assertEqual(api.set_my_commands.call_args.args[0], bot.command_list())
+
+    async def test_rate_limited_profile_does_not_abort_startup(self):
+        from telegram.error import RetryAfter
+        from datetime import timedelta
+        for cooldown in (8217, timedelta(seconds=8217)):
+            for method in ('get_my_name', 'set_my_name', 'get_my_short_description',
+                           'set_my_short_description', 'get_my_description', 'set_my_description',
+                           'get_my_commands', 'set_my_commands'):
+                api = self.profile_api(False)
+                getattr(api, method).side_effect = RetryAfter(cooldown)
+                await bot.setup(SimpleNamespace(bot=api))
+                self.assertEqual(getattr(api, method).await_count, 1)
+
+    async def test_network_error_does_not_abort_profile_setup(self):
+        from telegram.error import NetworkError
+        api = self.profile_api(False)
+        api.set_my_name.side_effect = NetworkError('connection failed')
+        await bot.setup(SimpleNamespace(bot=api))
+        api.set_my_name.assert_awaited_once()
+
+    async def test_wrong_bot_still_refused(self):
+        api = self.profile_api()
+        api.get_me.return_value = SimpleNamespace(username='other_bot')
+        with self.assertRaises(RuntimeError):
+            await bot.setup(SimpleNamespace(bot=api))
+        api.get_my_name.assert_not_awaited()
