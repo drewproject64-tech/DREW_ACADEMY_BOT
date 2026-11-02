@@ -1,214 +1,197 @@
-"""DREW ACADEMY: three educational features, without external AI services."""
+"""Three simple educational tools for @DREW_ACADEMY_BOT."""
 import logging
 import os
-import secrets
-import traceback
+import random
 import httpx
-from telegram import BotCommand, InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup, Update
+from telegram import BotCommand, ReplyKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-from content import LESSONS, make_plan
+from content import LESSONS
 
 NAME = 'DREW ACADEMY'
 USERNAME = 'DREW_ACADEMY_BOT'
-ABOUT = 'Learn everyday digital skills with short lessons, practice quizzes and a personal study-plan builder.'
+ABOUT = 'Short digital skills lessons, one-question practice quizzes and a simple study-plan calculator.'
 DESCRIPTION = (
-    'Welcome to DREW ACADEMY, a free educational bot for everyday digital skills and study habits.\n\n'
-    '1. Lessons: explore source checking, account security, clear writing, file organization, active learning and task planning.\n'
-    '2. Practice quizzes: answer questions and read explanations.\n'
-    '3. Study planner: choose a topic, daily study time and number of days to create a practical plan.\n\n'
-    'Use /start to begin. No registration or payment is required.'
+    'DREW ACADEMY offers three free educational tools directly in Telegram.\n\n'
+    'Lessons: read a short digital skills lesson with a practical exercise.\n'
+    'Practice quiz: answer one question and receive an explanation.\n'
+    'Study planner: enter daily minutes and study days to calculate a plan.\n\n'
+    'Tap Start and choose a button. No registration or payment is required.'
 )
-TOPICS = list(LESSONS)
+KEYBOARD = ReplyKeyboardMarkup([['Lessons'], ['Practice quiz'], ['Study planner']], resize_keyboard=True)
 LOG = logging.getLogger(__name__)
 
 
-def keyboard(rows):
-    return Markup([[Button(label, callback_data=data) for label, data in row] for row in rows])
+def study_plan(text):
+    parts = text.split()
+    if len(parts) != 2 or any(not value.isascii() or not value.isdigit() for value in parts):
+        raise ValueError('Enter two whole numbers: daily minutes and days. Example: 30 5')
+    # Check length before int conversion, including maliciously oversized numbers.
+    if any(len(value) > 3 for value in parts):
+        raise ValueError('Choose 10–180 minutes per day and 1–7 days.')
+    minutes, days = map(int, parts)
+    if not 10 <= minutes <= 180 or not 1 <= days <= 7:
+        raise ValueError('Choose 10–180 minutes per day and 1–7 days.')
+    review = minutes // 3
+    practice = minutes - review - 2
+    return (f'Your study plan\n\n{minutes} minutes per day for {days} day(s).\n'
+            f'Total study time: {minutes * days} minutes.\n\n'
+            f'Each day:\n{review} minutes: read or recall a lesson.\n'
+            f'{practice} minutes: complete its exercise or practice questions.\n'
+            '2 minutes: write what you learned and your next step.\n\n'
+            'Use Lessons to choose material, then Practice quiz to check your understanding.')
 
 
-def menu():
-    return keyboard([[('Lessons', 'lessons')], [('Practice quiz', 'quiz')], [('Study planner', 'planner')]])
-
-
-def topics(prefix):
-    return keyboard([[(topic, f'{prefix}:{i}')] for i, topic in enumerate(TOPICS)] + [[('Main menu', 'menu')]])
+async def reply(message, text):
+    await message.reply_text(text, reply_markup=KEYBOARD)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.effective_message.reply_text(
-        'Welcome to DREW ACADEMY. Learn everyday digital skills and build useful study habits. Choose one of three tools:', reply_markup=menu())
+    await reply(update.effective_message,
+                'Welcome to DREW ACADEMY. Choose one of three free tools:\n\n'
+                'Lessons — read a short digital skills lesson.\n'
+                'Practice quiz — answer one question with feedback.\n'
+                'Study planner — calculate a study plan.\n\n'
+                'Tap a button below. You can also use /lessons, /quiz or /planner.')
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        '/lessons — select a short lesson\n/quiz — practice five questions with explanations\n/planner — build a 1–7 day study plan\n'
-        '/cancel — clear your current session\n/privacy — how data is handled\n\nUse the buttons below to begin.', reply_markup=menu())
+    await reply(update.effective_message,
+                'Choose a button or use /lessons, /quiz or /planner.\n'
+                'For a quiz, reply A, B or C. For a plan, reply with minutes and days, such as 30 5.\n'
+                '/cancel clears your current question or plan. /privacy explains data handling.')
 
 
 async def privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        'This bot uses your Telegram user ID to keep quiz and planner choices in server memory while it runs. '
-        'It does not save a user database, send learning inputs to AI services, or request payments or contact details. '
-        'Use /cancel to clear your session. Sessions also disappear when the bot restarts. '
-        'Telegram processes messages under its own privacy policy. Hosting providers may process operational metadata. '
-        'Please do not send passwords, login codes or sensitive personal information.')
+    await reply(update.effective_message,
+                'The bot keeps only your current quiz answer or planner mode in server memory. '
+                'It does not create a user database or send inputs to AI services. '
+                '/cancel clears your session; restarting the service also clears sessions. '
+                'Telegram and the hosting provider process service traffic under their policies. '
+                'Do not send passwords, login codes or sensitive personal information.')
+
+
+async def lesson(message, context):
+    context.user_data.clear()
+    title = random.choice(list(LESSONS))
+    await reply(message, f'{title}\n\n{LESSONS[title][0]}\n\nTap Lessons for another lesson.')
+
+
+async def quiz(message, context):
+    context.user_data.clear()
+    title = random.choice(list(LESSONS))
+    question, choices, correct, explanation = LESSONS[title][1]
+    # Commit session state only after Telegram accepts the question.
+    await reply(message, question + '\n\n' + '\n'.join(
+        f'{letter}. {choice}' for letter, choice in zip('ABC', choices)) + '\n\nReply A, B or C.')
+    context.user_data['quiz'] = (correct, choices[correct], explanation)
+
+
+async def planner(message, context):
+    context.user_data.clear()
+    await reply(message, 'Enter your daily study minutes and number of days.\n\n'
+                'Example: 30 5 means 30 minutes a day for 5 days.\n'
+                'Choose 10–180 minutes and 1–7 days.')
+    context.user_data['planner'] = True
 
 
 async def feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    command = update.effective_message.text.split()[0].split('@')[0][1:]
-    context.user_data.clear()
-    if command == 'lessons':
-        await update.effective_message.reply_text('Choose a lesson:', reply_markup=topics('lesson'))
-    elif command == 'quiz':
-        await begin_quiz(update.effective_message, context)
-    else:
-        await update.effective_message.reply_text('Choose your study topic:', reply_markup=topics('plan'))
+    command = update.effective_message.text.split()[0].split('@')[0].lower()
+    await {'/lessons': lesson, '/quiz': quiz, '/planner': planner}[command](update.effective_message, context)
 
 
-async def begin_quiz(message, context):
-    context.user_data.clear()
-    context.user_data['quiz'] = {'items': secrets.SystemRandom().sample(TOPICS, 5), 'position': 0, 'score': 0, 'nonce': secrets.token_hex(4)}
-    await ask_question(message, context)
-
-
-async def ask_question(message, context):
-    state = context.user_data['quiz']
-    question, options, _, _ = LESSONS[state['items'][state['position']]][1]
-    await message.reply_text(f"Question {state['position'] + 1}/5\n\n{question}", reply_markup=keyboard(
-        [[(option, f"answer:{state['nonce']}:{state['position']}:{i}")] for i, option in enumerate(options)] + [[('Main menu', 'menu')]]))
-
-
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    # The acknowledgement only dismisses Telegram's spinner. A stale query or
-    # transient connection failure must not prevent the actual tool response.
-    try:
-        await query.answer(connect_timeout=3, read_timeout=3, write_timeout=3)
-    except TelegramError as error:
-        LOG.warning('Button acknowledgement failed (%s); continuing', type(error).__name__)
-    data = query.data or ''
-    message = query.message
-    if message is None:
-        return
-    if data == 'menu':
+async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    text = (message.text or '').strip()
+    action = {'lessons': lesson, 'practice quiz': quiz, 'study planner': planner}.get(text.lower())
+    if action:
+        await action(message, context)
+    elif 'quiz' in context.user_data:
+        if text.upper() not in ('A', 'B', 'C'):
+            await reply(message, 'Please reply A, B or C, or tap a tool to switch.')
+            return
+        correct, answer, explanation = context.user_data['quiz']
+        right = 'ABC'.index(text.upper()) == correct
+        await reply(message, f"{'Correct.' if right else 'Keep practicing.'} Answer: {answer}\n\n{explanation}\n\nTap Practice quiz for another question.")
         context.user_data.clear()
-        await message.reply_text('Choose a learning tool:', reply_markup=menu())
-    elif data in ('lessons', 'planner', 'quiz'):
-        context.user_data.clear()
-        if data == 'quiz':
-            await begin_quiz(message, context)
-        else:
-            await message.reply_text('Choose a topic:', reply_markup=topics('lesson' if data == 'lessons' else 'plan'))
-    elif data.startswith(('lesson:', 'plan:')):
-        prefix, raw = data.split(':')
-        if not raw.isdigit() or not 0 <= int(raw) < len(TOPICS):
-            return
-        topic = TOPICS[int(raw)]
-        if prefix == 'lesson':
-            await message.reply_text(f'{topic}\n\n{LESSONS[topic][0]}', reply_markup=keyboard([[('More lessons', 'lessons')], [('Practice quiz', 'quiz')], [('Main menu', 'menu')]]))
-        else:
-            context.user_data.clear()
-            context.user_data['plan_topic'] = topic
-            await message.reply_text('How many minutes per day?', reply_markup=keyboard([[(str(n), f'minutes:{n}') for n in (15, 30, 45, 60)], [('Main menu', 'menu')]]))
-    elif data.startswith('minutes:'):
-        raw = data.split(':')[1]
-        if 'plan_topic' not in context.user_data or raw not in ('15', '30', '45', '60'):
-            await message.reply_text('Please start a new plan.', reply_markup=menu())
-            return
-        context.user_data['plan_minutes'] = int(raw)
-        await message.reply_text('How many days?', reply_markup=keyboard([[(str(n), f'days:{n}') for n in range(1, 5)], [(str(n), f'days:{n}') for n in range(5, 8)], [('Main menu', 'menu')]]))
-    elif data.startswith('days:'):
-        raw = data.split(':')[1]
-        if not raw.isdigit() or not 1 <= int(raw) <= 7 or 'plan_minutes' not in context.user_data:
-            await message.reply_text('Please start a new plan.', reply_markup=menu())
-            return
-        plan = make_plan(context.user_data['plan_topic'], context.user_data['plan_minutes'], int(raw))
-        context.user_data.clear()
-        await message.reply_text(plan, reply_markup=menu())
-    elif data.startswith('answer:'):
-        parts = data.split(':')
-        state = context.user_data.get('quiz')
-        if len(parts) != 4 or not state or parts[1] != state['nonce'] or parts[2] != str(state['position']) or parts[3] not in ('0', '1', '2'):
-            await message.reply_text('That question is no longer active. Use /quiz for a fresh quiz.')
-            return
-        _, options, correct, explanation = LESSONS[state['items'][state['position']]][1]
-        right = int(parts[3]) == correct
-        state['score'] += int(right)
-        state['position'] += 1
-        # Score/position already prevent duplicate answers. Editing old markup
-        # is cosmetic and can fail if a message is old or no longer editable.
+    elif context.user_data.get('planner'):
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except TelegramError as error:
-            LOG.warning('Quiz keyboard cleanup failed (%s); continuing', type(error).__name__)
-        await message.reply_text(f"{'Correct.' if right else 'Keep practicing.'} Answer: {options[correct]}\n\n{explanation}")
-        if state['position'] == len(state['items']):
-            score = state['score']
-            context.user_data.clear()
-            await message.reply_text(f'Quiz complete: {score}/5. Review the lessons and try again whenever you like.', reply_markup=menu())
-        else:
-            await ask_question(message, context)
+            result = study_plan(text)
+        except ValueError as error:
+            await reply(message, str(error))
+            return
+        await reply(message, result)
+        context.user_data.clear()
+    else:
+        await reply(message, 'Choose Lessons, Practice quiz or Study planner below. Use /help for instructions.')
+
+
+async def legacy_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Old messages may still contain inline buttons from the previous version.
+    try:
+        await update.callback_query.answer()
+    except TelegramError:
+        pass
+    if update.effective_message:
+        await start(update, context)
 
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text('Please choose a tool below, or use /help. Use /cancel to clear your current session.', reply_markup=menu())
+    if update.effective_message:
+        await reply(update.effective_message, 'Please use a menu button or /start. The tools accept text messages.')
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # Do not log update contents or exception strings: these can contain private input or token URLs.
-    frames = traceback.extract_tb(context.error.__traceback__)
-    location = ' > '.join(f'{os.path.basename(f.filename)}:{f.lineno}:{f.name}' for f in frames[-5:])
-    LOG.error('Update failed (%s) at %s', type(context.error).__name__, location)
-    if context.error.__cause__:
-        LOG.error('Underlying error type: %s', type(context.error.__cause__).__name__)
+    LOG.error('Telegram operation failed (%s)', type(context.error).__name__)
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text('Something went wrong. Please try /start again.')
-        except Exception:
-            LOG.error('Could not deliver recovery message')
+            await reply(update.effective_message, 'The request could not be completed. Please try again or use /start.')
+        except TelegramError:
+            LOG.error('Recovery message could not be sent')
 
 
 async def setup(application: Application):
     me = await application.bot.get_me()
     if (me.username or '').lower() != USERNAME.lower():
-        raise RuntimeError('BOT_TOKEN belongs to a different bot; use the token for DREW_ACADEMY_BOT.')
+        raise RuntimeError('BOT_TOKEN must belong to @DREW_ACADEMY_BOT.')
     await application.bot.set_my_name(NAME)
     await application.bot.set_my_short_description(ABOUT)
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_commands([BotCommand(c, d) for c, d in [
-        ('start', 'Open the learning menu'), ('lessons', 'Read digital skills lessons'),
-        ('quiz', 'Practice five questions'), ('planner', 'Build a study plan'),
-        ('help', 'How to use the bot'), ('privacy', 'Data and privacy information'), ('cancel', 'Clear your session')]])
+        ('start', 'Open the three-tool menu'), ('lessons', 'Read a digital skills lesson'),
+        ('quiz', 'Answer one practice question'), ('planner', 'Calculate a study plan'),
+        ('help', 'Read instructions'), ('cancel', 'Clear your current session'), ('privacy', 'Read data information')]])
     LOG.warning('Profile configured for @%s; starting polling', me.username)
 
 
 def api_request():
-    # Retry only connection establishment, not message sends after an uncertain
-    # response: blind read retries can deliver the same message twice.
-    return HTTPXRequest(connection_pool_size=32, connect_timeout=10,
-                        read_timeout=20, write_timeout=20, pool_timeout=5,
+    return HTTPXRequest(connect_timeout=10, read_timeout=20, write_timeout=20,
                         httpx_kwargs={'transport': httpx.AsyncHTTPTransport(retries=2)})
 
 
-def main():
-    token = os.environ.get('BOT_TOKEN', '').strip()
-    if not token:
-        raise SystemExit('Set BOT_TOKEN to the token from BotFather before starting.')
-    logging.basicConfig(level=logging.WARNING)
-    logging.getLogger('httpx').setLevel(logging.WARNING)
+def build_application(token):
     app = (Application.builder().token(token).request(api_request())
            .get_updates_request(api_request()).post_init(setup).build())
     app.add_handler(CommandHandler(['start', 'cancel'], start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('privacy', privacy))
     app.add_handler(CommandHandler(['lessons', 'quiz', 'planner'], feature))
-    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(CallbackQueryHandler(legacy_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     app.add_handler(MessageHandler(filters.ALL, fallback))
     app.add_error_handler(error_handler)
-    app.run_polling(allowed_updates=['message', 'callback_query'])
+    return app
+
+
+def main():
+    token = os.environ.get('BOT_TOKEN', '').strip()
+    if not token:
+        raise SystemExit('Set BOT_TOKEN in the hosting environment before starting.')
+    logging.basicConfig(level=logging.WARNING)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    build_application(token).run_polling(allowed_updates=['message', 'callback_query'])
 
 
 if __name__ == '__main__':

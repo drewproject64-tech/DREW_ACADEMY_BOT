@@ -1,96 +1,85 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from telegram.error import NetworkError
 import bot
-from telegram.error import NetworkError, BadRequest
-from content import LESSONS, make_plan
 
 class ContentTests(unittest.TestCase):
-    def test_all_plans_and_profile_limits(self):
+    def test_plan_validation_and_totals(self):
+        for minutes in (10, 30, 180):
+            for days in (1, 5, 7):
+                self.assertIn(f'Total study time: {minutes * days}', bot.study_plan(f'{minutes} {days}'))
+        for text in ('', '30', '30.5 5', '-10 5', '30 0', '181 7', '30 8', '9'*5000+' 5', '٣٠ ٥'):
+            with self.assertRaises(ValueError):
+                bot.study_plan(text)
+
+    def test_three_buttons_and_profile(self):
+        self.assertEqual([b.text for row in bot.KEYBOARD.keyboard for b in row],
+                         ['Lessons', 'Practice quiz', 'Study planner'])
         self.assertLessEqual(len(bot.ABOUT), 120)
         self.assertLessEqual(len(bot.DESCRIPTION), 512)
-        for topic in LESSONS:
-            for minutes in (15, 30, 45, 60):
-                for days in range(1, 8):
-                    plan = make_plan(topic, minutes, days)
-                    self.assertIn(f'Day {days}:', plan)
-                    self.assertNotIn(f'Day {days + 1}:', plan)
-                    self.assertLess(len(plan), 4096)
-        for args in [('invalid', 15, 1), (bot.TOPICS[0], 0, 1), (bot.TOPICS[0], 15, 8)]:
-            with self.assertRaises(ValueError):
-                make_plan(*args)
 
 class FlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.message = SimpleNamespace(reply_text=AsyncMock())
+        self.message = SimpleNamespace(text='', reply_text=AsyncMock())
+        self.update = SimpleNamespace(effective_message=self.message)
         self.context = SimpleNamespace(user_data={})
 
-    async def click(self, data):
-        query = SimpleNamespace(data=data, message=self.message, answer=AsyncMock(), edit_message_reply_markup=AsyncMock())
-        await bot.callback(SimpleNamespace(callback_query=query), self.context)
+    async def send(self, text):
+        self.message.text = text
+        await bot.text_message(self.update, self.context)
 
-    async def test_quiz_score_and_stale_answers(self):
-        await self.click('quiz')
-        stale = None
-        for index in range(5):
-            state = self.context.user_data['quiz']
-            correct = LESSONS[state['items'][index]][1][2]
-            answer = f"answer:{state['nonce']}:{index}:{correct}"
-            await self.click(answer)
-            if index == 0:
-                stale = answer
-                await self.click(stale)
-                self.assertEqual(self.context.user_data['quiz']['score'], 1)
-                self.assertEqual(self.context.user_data['quiz']['position'], 1)
-        self.assertEqual(self.context.user_data, {})
-        self.assertIn('5/5', self.message.reply_text.call_args.args[0])
-        await self.click(stale)
-        self.assertIn('no longer active', self.message.reply_text.call_args.args[0])
-
-    async def test_acknowledgement_failure_does_not_break_lesson(self):
-        for error in (NetworkError('connection interrupted'), BadRequest('query is too old')):
-            query = SimpleNamespace(data='lesson:0', message=self.message,
-                answer=AsyncMock(side_effect=error), edit_message_reply_markup=AsyncMock())
-            await bot.callback(SimpleNamespace(callback_query=query), self.context)
-            self.assertIn(LESSONS[bot.TOPICS[0]][0], self.message.reply_text.call_args.args[0])
-
-    async def test_failed_keyboard_edit_still_delivers_quiz_feedback(self):
-        await self.click('quiz')
-        state = self.context.user_data['quiz']
-        correct = LESSONS[state['items'][0]][1][2]
-        query = SimpleNamespace(data=f"answer:{state['nonce']}:0:{correct}", message=self.message,
-            answer=AsyncMock(), edit_message_reply_markup=AsyncMock(side_effect=NetworkError('offline')))
-        await bot.callback(SimpleNamespace(callback_query=query), self.context)
-        self.assertEqual(state['score'], 1)
-        self.assertEqual(state['position'], 1)
-        self.assertIn('Question 2/5', self.message.reply_text.call_args.args[0])
-        self.assertTrue(any('Correct.' in call.args[0] for call in self.message.reply_text.call_args_list))
-
-    async def test_planner_and_interrupted_flow(self):
-        await self.click('plan:0')
-        await self.click('minutes:30')
-        await self.click('days:7')
-        self.assertIn('Day 7:', self.message.reply_text.call_args.args[0])
-        self.assertEqual(self.context.user_data, {})
-        await self.click('minutes:30')
-        self.assertIn('new plan', self.message.reply_text.call_args.args[0])
-        await self.click('plan:1')
-        await self.click('menu')
+    async def test_all_three_features_and_switching(self):
+        await self.send('Lessons')
+        self.assertIn('Practice:', self.message.reply_text.call_args.args[0])
+        await self.send('Practice quiz')
+        await self.send('Study planner')
+        self.assertNotIn('quiz', self.context.user_data)
+        await self.send('30 5')
+        self.assertIn('150 minutes', self.message.reply_text.call_args.args[0])
         self.assertEqual(self.context.user_data, {})
 
-    async def test_all_lessons(self):
-        for i, topic in enumerate(bot.TOPICS):
-            await self.click(f'lesson:{i}')
-            self.assertIn(LESSONS[topic][0], self.message.reply_text.call_args.args[0])
+    async def test_quiz_wrong_right_invalid_and_replay(self):
+        for right in (True, False):
+            await self.send('Practice quiz')
+            correct = self.context.user_data['quiz'][0]
+            await self.send('invalid')
+            self.assertIn('quiz', self.context.user_data)
+            await self.send('ABC'[correct if right else (correct + 1) % 3])
+            self.assertIn('Correct.' if right else 'Keep practicing.', self.message.reply_text.call_args.args[0])
+            self.assertEqual(self.context.user_data, {})
+        await self.send('A')
+        self.assertIn('Choose Lessons', self.message.reply_text.call_args.args[0])
 
-    async def test_profile_setup_and_wrong_token_guard(self):
+    async def test_planner_invalid_then_correct_and_cancel(self):
+        await self.send('Study planner')
+        await self.send('0 0')
+        self.assertTrue(self.context.user_data['planner'])
+        await self.send('10 1')
+        self.assertIn('Your study plan', self.message.reply_text.call_args.args[0])
+        await self.send('Practice quiz')
+        await bot.start(self.update, self.context)
+        self.assertEqual(self.context.user_data, {})
+
+    async def test_failed_question_delivery_keeps_no_pending_quiz(self):
+        self.message.reply_text.side_effect = NetworkError('offline')
+        with self.assertRaises(NetworkError):
+            await self.send('Practice quiz')
+        self.assertNotIn('quiz', self.context.user_data)
+
+    async def test_legacy_buttons_recover(self):
+        self.update.callback_query = SimpleNamespace(answer=AsyncMock(side_effect=NetworkError('offline')))
+        await bot.legacy_button(self.update, self.context)
+        self.assertIn('Welcome', self.message.reply_text.call_args.args[0])
+
+    async def test_profile_setup_and_token_guard(self):
         api = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(username=bot.USERNAME)),
             set_my_name=AsyncMock(), set_my_short_description=AsyncMock(),
             set_my_description=AsyncMock(), set_my_commands=AsyncMock())
         await bot.setup(SimpleNamespace(bot=api))
         api.set_my_short_description.assert_awaited_once_with(bot.ABOUT)
         api.set_my_description.assert_awaited_once_with(bot.DESCRIPTION)
-        api.get_me.return_value = SimpleNamespace(username='other_bot')
+        api.get_me.return_value = SimpleNamespace(username='wrong_bot')
         with self.assertRaises(RuntimeError):
             await bot.setup(SimpleNamespace(bot=api))
         self.assertEqual(api.set_my_name.await_count, 1)

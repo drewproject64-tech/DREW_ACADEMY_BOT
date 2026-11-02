@@ -38,22 +38,3 @@ LESSONS = {
          'A bounded activity makes it easier to start and check completion.')),
 }
 
-
-def make_plan(topic: str, minutes: int, days: int) -> str:
-    if topic not in LESSONS or minutes not in (15, 30, 45, 60) or not 1 <= days <= 7:
-        raise ValueError('Choose a listed topic, 15/30/45/60 minutes, and 1–7 days.')
-    reading = max(3, minutes // 3)
-    practice = minutes - reading - 3
-    tasks = [
-        'Read the lesson and explain its main idea in your own words.',
-        'Complete the lesson’s practical exercise with a new example.',
-        'Take the topic quiz and explain why the other choices are weaker.',
-        'Recall the key ideas without notes, then check your gaps.',
-        'Apply the skill to an everyday task and write what happened.',
-        'Teach the idea using a short example for a beginner.',
-        'Repeat the exercise and compare it with your first attempt.',
-    ]
-    lines = [f'Your study plan: {topic}', f'{days} day(s), {minutes} minutes per day.',
-             f'Each session: {reading} min review, {practice} min practice, 3 min reflection.']
-    lines += [f'Day {i + 1}: {tasks[i]}' for i in range(days)]
-    return '\n\n'.join(lines)
