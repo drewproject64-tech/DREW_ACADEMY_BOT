@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import bot
+from telegram.error import NetworkError, BadRequest
 from content import LESSONS, make_plan
 
 class ContentTests(unittest.TestCase):
@@ -45,6 +46,25 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('5/5', self.message.reply_text.call_args.args[0])
         await self.click(stale)
         self.assertIn('no longer active', self.message.reply_text.call_args.args[0])
+
+    async def test_acknowledgement_failure_does_not_break_lesson(self):
+        for error in (NetworkError('connection interrupted'), BadRequest('query is too old')):
+            query = SimpleNamespace(data='lesson:0', message=self.message,
+                answer=AsyncMock(side_effect=error), edit_message_reply_markup=AsyncMock())
+            await bot.callback(SimpleNamespace(callback_query=query), self.context)
+            self.assertIn(LESSONS[bot.TOPICS[0]][0], self.message.reply_text.call_args.args[0])
+
+    async def test_failed_keyboard_edit_still_delivers_quiz_feedback(self):
+        await self.click('quiz')
+        state = self.context.user_data['quiz']
+        correct = LESSONS[state['items'][0]][1][2]
+        query = SimpleNamespace(data=f"answer:{state['nonce']}:0:{correct}", message=self.message,
+            answer=AsyncMock(), edit_message_reply_markup=AsyncMock(side_effect=NetworkError('offline')))
+        await bot.callback(SimpleNamespace(callback_query=query), self.context)
+        self.assertEqual(state['score'], 1)
+        self.assertEqual(state['position'], 1)
+        self.assertIn('Question 2/5', self.message.reply_text.call_args.args[0])
+        self.assertTrue(any('Correct.' in call.args[0] for call in self.message.reply_text.call_args_list))
 
     async def test_planner_and_interrupted_flow(self):
         await self.click('plan:0')

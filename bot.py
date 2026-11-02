@@ -2,7 +2,11 @@
 import logging
 import os
 import secrets
+import traceback
+import httpx
 from telegram import BotCommand, InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup, Update
+from telegram.error import TelegramError
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from content import LESSONS, make_plan
 
@@ -79,7 +83,12 @@ async def ask_question(message, context):
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # The acknowledgement only dismisses Telegram's spinner. A stale query or
+    # transient connection failure must not prevent the actual tool response.
+    try:
+        await query.answer(connect_timeout=3, read_timeout=3, write_timeout=3)
+    except TelegramError as error:
+        LOG.warning('Button acknowledgement failed (%s); continuing', type(error).__name__)
     data = query.data or ''
     message = query.message
     if message is None:
@@ -129,7 +138,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         right = int(parts[3]) == correct
         state['score'] += int(right)
         state['position'] += 1
-        await query.edit_message_reply_markup(reply_markup=None)
+        # Score/position already prevent duplicate answers. Editing old markup
+        # is cosmetic and can fail if a message is old or no longer editable.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError as error:
+            LOG.warning('Quiz keyboard cleanup failed (%s); continuing', type(error).__name__)
         await message.reply_text(f"{'Correct.' if right else 'Keep practicing.'} Answer: {options[correct]}\n\n{explanation}")
         if state['position'] == len(state['items']):
             score = state['score']
@@ -145,7 +159,11 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     # Do not log update contents or exception strings: these can contain private input or token URLs.
-    LOG.error('Update failed (%s)', type(context.error).__name__)
+    frames = traceback.extract_tb(context.error.__traceback__)
+    location = ' > '.join(f'{os.path.basename(f.filename)}:{f.lineno}:{f.name}' for f in frames[-5:])
+    LOG.error('Update failed (%s) at %s', type(context.error).__name__, location)
+    if context.error.__cause__:
+        LOG.error('Underlying error type: %s', type(context.error.__cause__).__name__)
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text('Something went wrong. Please try /start again.')
@@ -164,6 +182,15 @@ async def setup(application: Application):
         ('start', 'Open the learning menu'), ('lessons', 'Read digital skills lessons'),
         ('quiz', 'Practice five questions'), ('planner', 'Build a study plan'),
         ('help', 'How to use the bot'), ('privacy', 'Data and privacy information'), ('cancel', 'Clear your session')]])
+    LOG.warning('Profile configured for @%s; starting polling', me.username)
+
+
+def api_request():
+    # Retry only connection establishment, not message sends after an uncertain
+    # response: blind read retries can deliver the same message twice.
+    return HTTPXRequest(connection_pool_size=32, connect_timeout=10,
+                        read_timeout=20, write_timeout=20, pool_timeout=5,
+                        httpx_kwargs={'transport': httpx.AsyncHTTPTransport(retries=2)})
 
 
 def main():
@@ -172,7 +199,8 @@ def main():
         raise SystemExit('Set BOT_TOKEN to the token from BotFather before starting.')
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger('httpx').setLevel(logging.WARNING)
-    app = Application.builder().token(token).post_init(setup).build()
+    app = (Application.builder().token(token).request(api_request())
+           .get_updates_request(api_request()).post_init(setup).build())
     app.add_handler(CommandHandler(['start', 'cancel'], start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('privacy', privacy))
